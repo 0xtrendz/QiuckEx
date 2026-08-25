@@ -15,6 +15,7 @@ import { CancellationStore } from "./cancellation-token";
 import { JobQueueInitializer } from "./job-queue-initializer.service";
 import { JobAdminController } from "./job-admin.controller";
 import { JobQueueMetricsService } from "./job-queue-metrics.service";
+import { JobQueueAlertingService } from "./job-queue-alerting.service";
 import { SupabaseModule } from "../supabase/supabase.module";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { LinksModule } from "../links/links.module";
@@ -44,6 +45,7 @@ import {
  * - CancellationStore: Cancellation token management
  * - JobQueueInitializer: Registers all job handlers at startup
  * - JobQueueMetricsService: Prometheus metrics for job lifecycle events
+ * - JobQueueAlertingService: Monitors queue metrics and fires alerts
  * - JobAdminController: Admin API endpoints for job monitoring and management
  * - WebhookDeliveryHandler: Handler for webhook delivery jobs
  * - RecurringPaymentHandler: Handler for recurring payment jobs
@@ -73,6 +75,7 @@ import {
     CancellationStore,
     JobQueueInitializer,
     JobQueueMetricsService,
+    JobQueueAlertingService,
     WebhookDeliveryHandler,
     RecurringPaymentHandler,
     ExportGenerationHandler,
@@ -86,6 +89,7 @@ import {
     JobRepository,
     JobReplayRepository,
     JobQueueMetricsService,
+    JobQueueAlertingService,
     WebhookDeliveryHandler,
     RecurringPaymentHandler,
     ExportGenerationHandler,
