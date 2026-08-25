@@ -3,7 +3,7 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
-    "start": "expo start",
+    "start": "node init && expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
@@ -11,7 +11,7 @@
     "lint": "expo lint",
     "test": "echo 'Skipping mobile checks in backend release pipeline' || exit 0",
     "type-check": "tsc --noEmit",
-    "build": "pnpm type-check && pnpm lint"
+    "build": "node init && pnpm type-check && pnpm lint"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
