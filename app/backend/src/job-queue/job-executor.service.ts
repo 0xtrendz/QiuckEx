@@ -20,7 +20,7 @@ import { Job, JobStatus, RetryPolicy } from './types';
  * 
  * This service is responsible for:
  * - Polling the database every 10 seconds for due jobs
- * - Querying jobs where status=pending AND scheduled_at <= NOW AND visibility_timeout expired
+ * - Querying jobs where status=pending AND scheduled_at <= NOW and visibility_timeout expired
  * - Processing up to 100 jobs per poll
  * 
  * Future tasks (3.2-3.5) will implement:
@@ -62,7 +62,7 @@ export class JobExecutor implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(
-        `Failed to reset stale jobs on startup: ${error.message}`,
+        Failed to reset stale jobs on startup: ${error.message}`,
         error.stack,
       );
       // Don't throw - allow the application to start even if reset fails
@@ -100,7 +100,7 @@ export class JobExecutor implements OnModuleInit {
         return;
       }
 
-      this.logger.log(`Found ${jobs.length} due jobs to process`);
+      this.logger.log(Found ${jobs.length} due jobs to process`);
 
       // Process each job
       for (const job of jobs) {
@@ -108,14 +108,14 @@ export class JobExecutor implements OnModuleInit {
           await this.executeJob(job);
         } catch (error) {
           this.logger.error(
-            `Error executing job ${job.id}: ${error.message}`,
+            Error executing job ${job.id}: ${error.message}`,
             error.stack,
           );
         }
       }
     } catch (error) {
       this.logger.error(
-        `Error processing due jobs: ${error.message}`,
+        Error processing due jobs: ${error.message}`,
         error.stack,
       );
     } finally {
@@ -152,7 +152,7 @@ export class JobExecutor implements OnModuleInit {
       // This indicates the previous execution attempt timed out or crashed
       if (job.visibilityTimeout && job.visibilityTimeout < new Date()) {
         this.logger.warn(
-          `Job ${job.id} has expired visibility timeout (type: ${job.type}, timeout: ${job.visibilityTimeout.toISOString()}). Treating as timeout failure.`,
+          Job ${job.id} has expired visibility timeout (type: ${job.type}, timeout: ${job.visibilityTimeout.toISOString()}). Treating as timeout failure.`,
         );
         
         // Treat expired visibility timeout as a failure
@@ -231,7 +231,7 @@ export class JobExecutor implements OnModuleInit {
    * 
    * Handles all types of failures including:
    * - Handler execution errors
-   * - Visibility timeout expiration (job took too long or executor crashed)
+   * - Visibility timeout expiration (job took long or executor crashed)
    * 
    * @param job - The failed job
    * @param error - The error that caused the failure
@@ -272,7 +272,7 @@ export class JobExecutor implements OnModuleInit {
       this.metrics.updateJobsDlqCount(job.type, 1);
 
       this.logger.warn(
-        `Job ${job.id} moved to DLQ after ${newAttempts} attempts (type: ${job.type})`,
+        Job ${job.id} moved to DLQ after ${newAttempts} attempts (type: ${job.type})`,
       );
 
       // Call handler's onFailure hook
@@ -281,7 +281,7 @@ export class JobExecutor implements OnModuleInit {
         await handler.onFailure(job, error);
       } catch (hookError) {
         this.logger.error({
-          message: `Failed to execute onFailure hook for job ${job.id}`,
+          message: Failed to execute onFailure hook for job ${job.id}`,
           jobId: job.id,
           error: hookError.message,
           stack: hookError.stack,
@@ -291,7 +291,7 @@ export class JobExecutor implements OnModuleInit {
       // Clean up cancellation token
       this.cancellationStore.clearCancellation(job.id);
     } else {
-      // Schedule retry: calculate retry delay and update scheduledAt
+      // Schedule retry: calculate retry delay and update scheduled
       const retryDelayMs = this.calculateRetryDelay(policy, newAttempts);
       const scheduledAt = new Date(Date.now() + retryDelayMs);
 
@@ -305,9 +305,10 @@ export class JobExecutor implements OnModuleInit {
       // Update gauge metrics: running -> pending
       this.metrics.updateJobsRunningCount(job.type, -1);
       this.metrics.updateJobsPendingCount(job.type, 1);
+      this.metrics.incrementJobsRetried(job.type);
 
       this.logger.log(
-        `Job ${job.id} scheduled for retry in ${retryDelayMs}ms (type: ${job.type}, attempt: ${newAttempts}/${policy.maxAttempts})`,
+        Job ${job.id} scheduled for retry in ${retryDelayMs}ms (type: ${job.type}, attempt: ${newAttempts}/${policy.maxAttempts})`,
       );
 
       // Clean up cancellation token
@@ -337,7 +338,7 @@ export class JobExecutor implements OnModuleInit {
         break;
       default:
         throw new Error(
-          `Unknown backoff strategy: ${(policy as RetryPolicy).backoffStrategy}`,
+          Unknown backoff strategy: ${(policy as RetryPolicy).backoffStrategy}`,
         );
     }
 
