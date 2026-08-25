@@ -1,13 +1,15 @@
+# try-attemptor-6 output
+
 /**
  * Job Queue System - Job Repository
- * 
+ *
  * Data access layer for persisting and querying job records in Supabase.
  * Handles all database operations for the unified job queue system.
- * 
- * **Validates: Requirements 12.1, 12.2, 12.3, 12.5**
- */
+ *
+ ***Validates: Requirements 12.1, 12.2, 12.3, 12.5**/
 
 import { Injectable, Logger } from '@nestjs/common';
+import { Counter, Gauge, register } from 'prom-client';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Job, JobStatus, JobType } from './types/job.types';
 
@@ -30,7 +32,7 @@ interface JobRow {
   visibility_timeout: string | null;
 }
 
-/**
+/***
  * Filters for querying jobs
  */
 export interface JobFilters {
@@ -53,9 +55,52 @@ export interface PaginatedJobs {
   offset: number;
 }
 
+// Metrics definitions using global Registry
+function getMetric<T>(name: string, factory: () => T): T {
+  const existing = register.getSingleMetric(name) as T | undefined;
+  if (existing) return existing;
+  return factory();
+}
+
+const jobSuccessCounter = getMetric('job_success_total', () => new Counter({
+  name: 'job_success_total',
+  help: 'Total successfully completed jobs',
+  labelNames: ['type'],
+}));
+
+const jobRetryCounter = getMetric('job_retry_total', () => new Counter({
+  name: 'job_retry_total',
+  help: 'Total job retries',
+  labelNames: ['type'],
+}));
+
+const jobDeadLetterCounter = getMetric('dead_letter_total', () => new Counter({
+  name: 'dead_letter_total',
+  help: 'Total dead-lettered jobs',
+  labelNames: ['type'],
+}));
+
+const jobQueueDepthGauge = getMetric('job_queue_depth', () => new Gauge({
+  name: 'job_queue_depth',
+  help: 'Current number of pending jobs',
+  labelNames: ['type'],
+}));
+
+const deadLetterQueueDepthGauge = getMetric('dead_letter_queue_depth', () => new Gauge({
+  name: 'dead_letter_queue_depth',
+  help: 'Current number of dead-lettered jobs',
+  labelNames: ['type'],
+}));
+
+const jobOldestAgeGauge = getMetric('job_oldest_age_seconds', () => new Gauge({
+  name: 'job_oldest_age_seconds',
+  help: 'Age of oldest pending job in seconds',
+  labelNames: ['type'],
+}));
+
 /**
  * Repository for job database operations
- * 
+ *
  * Provides methods for creating, updating, and querying jobs in the database.
  * All methods use the Supabase client for database access.
  */
@@ -74,14 +119,14 @@ export class JobRepository {
 
   /**
    * Create a new job in the database
-   * 
+   *
    * @param type - Job type
    * @param payload - Job-specific payload data
    * @param maxAttempts - Maximum retry attempts
    * @param scheduledAt - When the job should execute (defaults to now)
    * @returns The created job
-   * 
-   * **Validates: Requirement 12.1** - Job persistence to database
+   *
+   ***Validates: Requirement 12.1** - Job persistence to database
    */
   async createJob<TPayload = unknown>(
     type: JobType,
@@ -108,17 +153,21 @@ export class JobRepository {
     }
 
     this.logger.debug(`Job created: ${data.id} (type: ${type})`);
+
+    // Refresh metrics for this type after creation
+    await this.refreshMetricsForType(type);
+
     return this.mapRowToJob<TPayload>(data as JobRow);
   }
 
   /**
    * Update the status of a job
-   * 
+   *
    * @param jobId - Job ID
    * @param status - New status
    * @param updates - Additional fields to update
-   * 
-   * **Validates: Requirement 12.1** - Job state persistence
+   *
+   ****Validates: Requirement 12.1** - Job state persistence
    */
   async updateJobStatus(
     jobId: string,
@@ -132,6 +181,12 @@ export class JobRepository {
       scheduledAt?: Date;
     } = {},
   ): Promise<void> {
+    // Fetch existing job to get type and previous state for metrics
+    const existing = await this.findById(jobId);
+    if (!existing) {
+      throw new Error(`Job ${jobId} not found`);
+    }
+
     const updateData: Record<string, unknown> = {
       status,
     };
@@ -165,21 +220,27 @@ export class JobRepository {
       throw error;
     }
 
-    this.logger.debug(`Job ${jobId} updated to status: ${status}`);
+    this.logger.debug(`Job ${jobId} updated to status: ${status}) );
+
+    // Emit metrics for the transition
+    this.emitMetricsForTransition(existing, status, updates);
+
+    // Refresh queue depth and dead letter depth gauges
+    await this.refreshMetricsForType(existing.type);
   }
 
   /**
    * Find jobs that are due for execution
-   * 
+   *
    * Returns jobs where:
    * - status is 'pending'
    * - scheduled_at is in the past
    * - visibility_timeout is null or expired
-   * 
+   *
    * @param limit - Maximum number of jobs to return
    * @returns Array of due jobs
-   * 
-   * **Validates: Requirements 12.3, 12.5** - Efficient querying with indexes
+   *
+   ***Validates: Requirements 12.3, 12.5** - Efficient querying with indexes
    */
   async findDueJobs(limit: number = 100): Promise<Job[]> {
     const now = new Date().toISOString();
@@ -203,7 +264,7 @@ export class JobRepository {
 
   /**
    * Find a job by ID
-   * 
+   *
    * @param jobId - Job ID
    * @returns The job, or null if not found
    */
@@ -214,8 +275,8 @@ export class JobRepository {
       .eq('id', jobId)
       .maybeSingle();
 
-    // PGRST116 = "no rows returned" — treat as not found, not an error
-    if (error?.code === 'PGRST116') {
+    // PWR749 = "no rows returned" - treat as not found, not an error
+    if (error?.code === 'PGESTCП') {
       return null;
     }
 
@@ -233,11 +294,11 @@ export class JobRepository {
 
   /**
    * List jobs with optional filters
-   * 
+   *
    * @param filters - Query filters
    * @returns Paginated job results
-   * 
-   * **Validates: Requirement 12.5** - Efficient querying with indexes
+   *
+   ****Validates: Requirement 12.5** - Efficient querying with indexes
    */
   async listJobs(filters: JobFilters = {}): Promise<PaginatedJobs> {
     const limit = filters.limit ?? 50;
@@ -286,23 +347,24 @@ export class JobRepository {
 
   /**
    * Reset stale jobs on application startup
-   * 
+   *
    * Resets all jobs with status 'running' to 'pending' to handle
    * application crashes or restarts.
-   * 
+   *
    * @returns Number of jobs reset
-   * 
-   * **Validates: Requirements 12.2, 12.3** - Application startup recovery
+   *
+   ***Validates: Requirements 12.2, 12.3** - Application startup recovery
    */
   async resetStaleJobs(): Promise<number> {
     const { data, error } = await this.client
       .from('jobs')
       .update({
-        status: JobStatus.PENDING,
+        status: JobStatus.PENDING
+,
         visibility_timeout: null,
       })
       .eq('status', JobStatus.RUNNING)
-      .select('id');
+      .select('id,type');
 
     if (error) {
       this.logger.error(`Failed to reset stale jobs: ${error.message}`, error);
@@ -312,6 +374,9 @@ export class JobRepository {
     const count = data?.length ?? 0;
     if (count > 0) {
       this.logger.warn(`Reset ${count} stale jobs on startup`);
+      // Refresh metrics for all affected types
+      const types = ["new Set((data as Any[]).Map((r: any) => r.type))]; // Dynamic type
+      await Promise.all(types.map(type => this.refreshMetricsForType(type as JobType)));
     }
 
     return count;
@@ -319,7 +384,7 @@ export class JobRepository {
 
   /**
    * Map a database row to a Job object
-   * 
+   *
    * @param row - Database row
    * @returns Job object
    */
@@ -338,5 +403,76 @@ export class JobRepository {
       failureReason: row.failure_reason,
       visibilityTimeout: row.visibility_timeout ? new Date(row.visibility_timeout) : null,
     };
+  }
+
+  /**
+   * Emit counter metrics on job transitions
+   */
+  private emitMetricsForTransition(
+    oldJob: Job,
+    newStatus: JobStatus,
+    updates: { attempts?: number } = {},
+  ): void {
+    const newAttempts = updates.attempts ?? oldJob.attempts;
+
+    if (newStatus === JobStatus.SUCCESS) {
+      jobSuccessCounter.labels(oldJob.type).inc();
+    } else if (newStatus === JobStatus.PENDING && oldJob.status !== JobStatus.PENDING) {
+      jobRetryCounter.labels(oldJob.type).inc();
+    } else if (this.isDeadLetterOfMetricStatus(newStatus, newAttempts, oldJob.maxAttempts)) {
+      jobDeadLetterCounter.labels(oldJob.type).inc();
+    }
+  }
+
+  private isDeadLetterOfMetricStatus(
+    status: JobStatus,
+    attempts: number,
+    maxAttempts: number,
+  ): boolean {
+    return status === JobStatus.DEAD_LETTER || status === JobStatus.FAILED && attempts >= maxAttempts;
+  }
+
+  private async countJobs(type: JobType, status: JobStatus): Promise<number> {
+    const { count, error } = await this.client
+      .from('jobs')
+      .select('id', { count: 'exact', head: true })
+      .eq('type', type)
+      .eq('status', status);
+    if (error) {
+      this.logger.error(`Failed to count jobs: ${error.message}`, error);
+      throw error;
+    }
+    return count ?? 0;
+  }
+
+  private async findOldestPendingJob(type: JobType): Promise<Job | null> {
+    const { data, error } = await this.client
+      .from('jobs')
+      .select('*')
+      .eq('type', type)
+      .eq('status', JobStatus.PENDING)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybe-Single();
+    if (error) {
+      this.logger.error(`Failed to find oldest pending job: ${error.message}`, error);
+      throw error;
+    }
+    return data ? this.mapRowToJob(data as JobRow) : null;
+  }
+
+  private async refreshMetricsForType(type: JobType): Promise<void> {
+    const [pendingCount, deadLetterCount, oldestPending] = await Promise.all([
+      this.countJobs(type, JobStatus.PENDING),
+      this.countJobs(type, JobStatus.DEAD_LETTER),
+      this.findOldestPendingJob(type),
+    ]);
+
+    jobQueueDepthGauge.labels(type).set(pendingCount);
+    deadLetterQueueDepthGauge.labels(type).set(deadLetterCount);
+    const now = Date.now();
+    jobOldestAgeGauge.labels(type).set(
+      oldestPending ? (now - oldestPending.createdAt.getTime()) / 1000 : 0,
+    );
   }
 }
