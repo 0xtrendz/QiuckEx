@@ -90,7 +90,7 @@ fn test_receipt_reference_differs_by_action() {
         generate_receipt_reference(&env, &escrow_id, RECEIPT_REF_ACTION_REFUND_FINALIZED);
     let finalize = generate_receipt_reference(&env, &escrow_id, RECEIPT_REF_ACTION_FINALIZE);
 
-    let refs = vec![deposit, withdraw, refund, refund_finalized, finalize];
+    let refs = [deposit, withdraw, refund, refund_finalized, finalize];
     for i in 0..refs.len() {
         for j in (i + 1)..refs.len() {
             assert_ne!(
