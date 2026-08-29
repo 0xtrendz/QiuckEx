@@ -155,6 +155,10 @@ export class ExportStorageService {
    *
    * The token embeds its own expiry so the server stays stateless for
    * validation; the database record is only needed for ownership and retention.
+   *
+   * Important: the signature is encoded as base64url(raw digest bytes), not as
+   * the hex-encoded digest, to avoid ambiguous trailing bits in the signature
+   * segment during validation.
    */
   issueDownloadToken(opts: IssueDownloadTokenOptions): DownloadTokenPayload {
     const { jobId, userId } = opts;
@@ -163,7 +167,6 @@ export class ExportStorageService {
     const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
     const payload = `${jobId}|${userId}|${expiresAt}`;
     const signature = this.sign(payload);
-    // Token = base64url(<payload>) + '.' + base64url(<signature>)
     const token = `${toBase64Url(payload)}.${toBase64Url(signature)}`;
     return { token, expiresAt };
   }
@@ -186,15 +189,25 @@ export class ExportStorageService {
     }
 
     let payload: string;
-    let receivedSig: string;
+    let receivedSig: Buffer;
     try {
       payload = fromBase64Url(parts[0]);
-      receivedSig = fromBase64Url(parts[1]);
+      receivedSig = fromBase64UrlBuffer(parts[1]);
     } catch {
       return { valid: false, errorCode: EXPORT_LINK_INVALID };
     }
 
-    // Constant-time signature comparison
+    // Reject non-canonical base64url encodings: some trailing-bit mutations can
+    // decode to the same raw bytes if the final character falls in the unused
+    // padding bits. We require a canonical re-encode to ensure the token is exact.
+    if (toBase64Url(payload) !== parts[0]) {
+      return { valid: false, errorCode: EXPORT_LINK_INVALID };
+    }
+    if (toBase64Url(receivedSig) !== parts[1]) {
+      return { valid: false, errorCode: EXPORT_LINK_INVALID };
+    }
+
+    // Constant-time signature comparison against the raw HMAC bytes.
     const expectedSig = this.sign(payload);
     if (!safeEqual(receivedSig, expectedSig)) {
       return { valid: false, errorCode: EXPORT_LINK_INVALID };
@@ -355,10 +368,10 @@ export class ExportStorageService {
     }
   }
 
-  private sign(payload: string): string {
+  private sign(payload: string): Buffer {
     return createHmac('sha256', this.config.exportDownloadSecret)
       .update(payload)
-      .digest('hex');
+      .digest();
   }
 
   private mapRow(row: Record<string, unknown>): ArtifactRecord {
@@ -376,8 +389,9 @@ export class ExportStorageService {
 
 // ─── Pure utilities (module-private) ─────────────────────────────────────────
 
-function toBase64Url(value: string): string {
-  return Buffer.from(value, 'utf8')
+function toBase64Url(value: string | Buffer): string {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+  return buffer
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -391,11 +405,14 @@ function fromBase64Url(encoded: string): string {
   return Buffer.from(padded, 'base64').toString('utf8');
 }
 
-function safeEqual(a: string, b: string): boolean {
-  // Ensure both buffers are the same length before comparing so
-  // timingSafeEqual doesn't throw.
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
+function fromBase64UrlBuffer(encoded: string): Buffer {
+  const padded =
+    encoded.replace(/-/g, '+').replace(/_/g, '/') +
+    '='.repeat((4 - (encoded.length % 4)) % 4);
+  return Buffer.from(padded, 'base64');
+}
+
+function safeEqual(a: Buffer, b: Buffer): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
