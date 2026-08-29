@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   AnalyticsInterval,
   ReportType,
 } from './dto/analytics-query.dto';
+import { TimeRange } from './dto/dashboard-summary.dto';
 
 type PaymentRow = Record<string, unknown>;
 type RpcSummaryRow = {
@@ -73,9 +74,261 @@ export type AnalyticsReport = {
   };
 };
 
+export type DashboardSummary = {
+  volume: {
+    totalVolumeUsd: number;
+    paymentCount: number;
+  };
+  payments: {
+    successfulCount: number;
+    failedCount: number;
+    pendingCount: number;
+  };
+  refunds: {
+    totalCount: number;
+    pendingCount: number;
+    approvedCount: number;
+  };
+  health: {
+    successRate: number;
+    deliveryFailureRate: number;
+  };
+  window: {
+    startDate: string;
+    endDate: string;
+  };
+};
+
+export type AnalyticsFieldType = 'string' | 'number' | 'boolean' | 'object';
+
+export type AnalyticsFieldSchema = {
+  type: AnalyticsFieldType;
+  required: boolean;
+};
+
+export type AnalyticsEventSchema = {
+  name: string;
+  version: number;
+  fields: Record<string, AnalyticsFieldSchema>;
+};
+
+export type AnalyticsEvent = {
+  name: string;
+  version: number;
+  payload: Record<string, unknown>;
+};
+
+export type AnalyticsValidationResult = {
+  valid: boolean;
+  errors: string[];
+};
+
+/**
+ * Central, versioned registry of analytics event schemas.
+ *
+ * CI CONTRACT: Adding a required field or removing an existing field is a
+ * breaking change. The schema `version` MUST be incremented whenever the shape
+ * of an event changes. The accompanying schema-registry snapshot test compares
+ * the committed fingerprint (see `fingerprintAnalyticsRegistry`) against this
+ * registry and fails CI when a breaking change is made without a version bump.
+ */
+export const ANALYTICS_EVENT_REGISTRY: Record<string, AnalyticsEventSchema> = {
+  payment_recorded: {
+    name: 'payment_recorded',
+    version: 1,
+    fields: {
+      publicKey: { type: 'string', required: true },
+      asset: { type: 'string', required: true },
+      amountUsd: { type: 'number', required: true },
+      status: { type: 'string', required: true },
+      createdAt: { type: 'string', required: true },
+    },
+  },
+  report_exported: {
+    name: 'report_exported',
+    version: 1,
+    fields: {
+      publicKey: { type: 'string', required: true },
+      reportType: { type: 'string', required: true },
+      rowCount: { type: 'number', required: true },
+    },
+  },
+  dashboard_viewed: {
+    name: 'dashboard_viewed',
+    version: 1,
+    fields: {
+      publicKey: { type: 'string', required: true },
+      timeRange: { type: 'string', required: true },
+    },
+  },
+};
+
+/**
+ * Produces a stable, order-independent fingerprint of the registry so a
+ * snapshot/contract test can detect breaking changes (added required fields or
+ * removed fields) that were not accompanied by a version bump. Exported so
+ * dashboards and downstream consumers can read the exact schema surface they
+ * must conform to.
+ */
+export function fingerprintAnalyticsRegistry(
+  registry: Record<string, AnalyticsEventSchema> = ANALYTICS_EVENT_REGISTRY,
+): Record<string, { version: number; fields: Record<string, AnalyticsFieldSchema> }> {
+  return Object.fromEntries(
+    Object.entries(registry)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, schema]) => [
+        name,
+        {
+          version: schema.version,
+          fields: Object.fromEntries(
+            Object.entries(schema.fields).sort(([a], [b]) => a.localeCompare(b)),
+          ),
+        },
+      ]),
+  );
+}
+
 @Injectable()
 export class AnalyticsService {
+  private readonly logger = new Logger(AnalyticsService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
+
+  private invalidEventCount = 0;
+
+  /**
+   * Validates an analytics event against its versioned schema in the central
+   * registry. Returns a structured result listing every violation so producers
+   * can see exactly what broke.
+   */
+  validateAnalyticsEvent(event: AnalyticsEvent): AnalyticsValidationResult {
+    const errors: string[] = [];
+    const schema = ANALYTICS_EVENT_REGISTRY[event.name];
+
+    if (!schema) {
+      errors.push(`Unknown analytics event: ${event.name}`);
+      return { valid: false, errors };
+    }
+
+    if (event.version !== schema.version) {
+      errors.push(
+        `Schema version mismatch for ${event.name}: expected ${schema.version}, received ${event.version}`,
+      );
+    }
+
+    for (const [field, spec] of Object.entries(schema.fields)) {
+      const value = event.payload[field];
+      if (value === undefined || value === null) {
+        if (spec.required) {
+          errors.push(`Missing required field "${field}" for event ${event.name}`);
+        }
+        continue;
+      }
+      const actualType = Array.isArray(value) ? 'object' : typeof value;
+      if (actualType !== spec.type) {
+        errors.push(
+          `Field "${field}" for event ${event.name} must be ${spec.type}, received ${actualType}`,
+        );
+      }
+    }
+
+    for (const field of Object.keys(event.payload)) {
+      if (!schema.fields[field]) {
+        errors.push(`Unexpected field "${field}" for event ${event.name}`);
+      }
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validates an event against its schema and records it. Invalid events are
+   * rejected (never persisted) and counted so producers surface breakages
+   * instead of silently corrupting dashboards.
+   */
+  async recordAnalyticsEvent(event: AnalyticsEvent): Promise<AnalyticsValidationResult> {
+    const result = this.validateAnalyticsEvent(event);
+
+    if (!result.valid) {
+      this.invalidEventCount += 1;
+      this.logger.warn(
+        `Rejected invalid analytics event "${event.name}": ${result.errors.join('; ')}`,
+      );
+      return result;
+    }
+
+    const client = this.supabase.getClient();
+    const { error } = await client.from('analytics_events').insert({
+      event_name: event.name,
+      schema_version: event.version,
+      payload: event.payload,
+      recorded_at: new Date().toISOString(),
+    });
+
+    if (error) {
+      this.logger.warn(
+        `Failed to persist analytics event "${event.name}": ${error.message}`,
+      );
+    }
+
+    return result;
+  }
+
+  /** Number of events rejected by schema validation since process start. */
+  getInvalidEventCount(): number {
+    return this.invalidEventCount;
+  }
+
+  /** Exposes the versioned schema registry for dashboards and consumers. */
+  getEventRegistry(): Record<string, AnalyticsEventSchema> {
+    return ANALYTICS_EVENT_REGISTRY;
+  }
+
+  async getDashboardSummary(
+    publicKey: string,
+    timeRange: TimeRange = TimeRange.WEEK,
+    startDate?: string,
+    endDate?: string,
+    organizationId?: string,
+  ): Promise<DashboardSummary> {
+    const { startIso, endIso } = this.resolveTimeRange(timeRange, startDate, endDate);
+
+    const [analyticsReport, refundCounts, deliveryFailures] = await Promise.all([
+      this.getAnalyticsReport(publicKey, startIso, endIso, AnalyticsInterval.DAILY, organizationId),
+      this.fetchRefundCounts(publicKey, startIso, endIso, organizationId),
+      this.fetchDeliveryFailureCount(publicKey, startIso, endIso, organizationId),
+    ]);
+
+    const pendingPayments = await this.fetchPendingPaymentCount(publicKey, startIso, endIso, organizationId);
+
+    return {
+      volume: {
+        totalVolumeUsd: analyticsReport.summary.totalVolumeUsd,
+        paymentCount: analyticsReport.summary.totalTransactions,
+      },
+      payments: {
+        successfulCount: analyticsReport.summary.successfulTransactions,
+        failedCount: analyticsReport.summary.failedTransactions,
+        pendingCount: pendingPayments,
+      },
+      refunds: {
+        totalCount: refundCounts.total,
+        pendingCount: refundCounts.pending,
+        approvedCount: refundCounts.approved,
+      },
+      health: {
+        successRate: analyticsReport.summary.conversionRate,
+        deliveryFailureRate: this.calculateDeliveryFailureRate(
+          analyticsReport.summary.totalTransactions,
+          deliveryFailures,
+        ),
+      },
+      window: {
+        startDate: startIso,
+        endDate: endIso,
+      },
+    };
+  }
 
   async getAnalyticsReport(
     publicKey: string,
@@ -580,6 +833,42 @@ export class AnalyticsService {
     return 0;
   }
 
+  private resolveTimeRange(
+    timeRange: TimeRange,
+    startDate?: string,
+    endDate?: string,
+  ): { startIso: string; endIso: string } {
+    if (timeRange === TimeRange.CUSTOM) {
+      return this.resolveDateWindow(startDate, endDate);
+    }
+
+    const end = new Date();
+    let start: Date;
+
+    switch (timeRange) {
+      case TimeRange.TODAY:
+        start = new Date(end);
+        start.setUTCHours(0, 0, 0, 0);
+        break;
+      case TimeRange.WEEK:
+        start = new Date(end);
+        start.setUTCDate(start.getUTCDate() - 7);
+        break;
+      case TimeRange.MONTH:
+        start = new Date(end);
+        start.setUTCDate(start.getUTCDate() - 30);
+        break;
+      default:
+        start = new Date(end);
+        start.setUTCDate(start.getUTCDate() - 7);
+    }
+
+    return {
+      startIso: start.toISOString(),
+      endIso: end.toISOString(),
+    };
+  }
+
   private resolveDateWindow(startDate?: string, endDate?: string): { startIso: string; endIso: string } {
     const end = endDate ? new Date(endDate) : new Date();
     const start = startDate
@@ -658,5 +947,105 @@ export class AnalyticsService {
 
   private round2(value: number): number {
     return Math.round(value * 100) / 100;
+  }
+
+  private async fetchRefundCounts(
+    publicKey: string,
+    startIso: string,
+    endIso: string,
+    organizationId?: string,
+  ): Promise<{ total: number; pending: number; approved: number }> {
+    const client = this.supabase.getClient();
+
+    let query = client
+      .from('refund_attempts')
+      .select('status')
+      .gte('created_at', startIso)
+      .lte('created_at', endIso);
+
+    if (organizationId) {
+      query = query.eq('organization_id', organizationId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      this.logger.warn(`Failed to fetch refund counts: ${error.message}`);
+      return { total: 0, pending: 0, approved: 0 };
+    }
+
+    const refunds = data ?? [];
+    return {
+      total: refunds.length,
+      pending: refunds.filter((r) => r.status === 'pending').length,
+      approved: refunds.filter((r) => r.status === 'approved').length,
+    };
+  }
+
+  private async fetchPendingPaymentCount(
+    publicKey: string,
+    startIso: string,
+    endIso: string,
+    organizationId?: string,
+  ): Promise<number> {
+    const client = this.supabase.getClient();
+
+    let query = client
+      .from('payment_records')
+      .select('id')
+      .or(`sender_public_key.eq.${publicKey},receiver_public_key.eq.${publicKey}`)
+      .gte('created_at', startIso)
+      .lte('created_at', endIso)
+      .in('status', ['pending', 'processing']);
+
+    if (organizationId) {
+      query = query.eq('organization_id', organizationId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      this.logger.warn(`Failed to fetch pending payment count: ${error.message}`);
+      return 0;
+    }
+
+    return data?.length ?? 0;
+  }
+
+  private async fetchDeliveryFailureCount(
+    publicKey: string,
+    startIso: string,
+    endIso: string,
+    organizationId?: string,
+  ): Promise<number> {
+    const client = this.supabase.getClient();
+
+    let query = client
+      .from('notification_logs')
+      .select('id')
+      .eq('recipient_public_key', publicKey)
+      .eq('status', 'failed')
+      .gte('created_at', startIso)
+      .lte('created_at', endIso);
+
+    if (organizationId) {
+      query = query.eq('organization_id', organizationId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      this.logger.warn(`Failed to fetch delivery failure count: ${error.message}`);
+      return 0;
+    }
+
+    return data?.length ?? 0;
+  }
+
+  private calculateDeliveryFailureRate(totalTransactions: number, deliveryFailures: number): number {
+    if (totalTransactions === 0) {
+      return 0;
+    }
+    return this.round2((deliveryFailures / totalTransactions) * 100);
   }
 }
