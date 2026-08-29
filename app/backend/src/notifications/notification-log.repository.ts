@@ -410,7 +410,21 @@ export class NotificationLogRepository {
       return { data: [], next_cursor: null, has_more: false };
     }
 
-    const rows = (data ?? []) as any[];
+    type WebhookAttemptRow = {
+      id: string;
+      event_type: string;
+      event_id: string;
+      status: string;
+      attempts: number | null;
+      last_error: string | null;
+      webhook_response_status: number | null;
+      webhook_response_body: string | null;
+      created_at: string;
+      updated_at: string | null;
+      webhook_delivered_at: string | null;
+    };
+
+    const rows = (data ?? []) as WebhookAttemptRow[];
     const hasMore = rows.length > effectiveLimit;
     const pageRows = hasMore ? rows.slice(0, effectiveLimit) : rows;
 
