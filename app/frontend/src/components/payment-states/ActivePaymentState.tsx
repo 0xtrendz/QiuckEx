@@ -2,8 +2,11 @@
 
 import { useState } from "react";
 import { SigningSummary } from "@/components/SigningSummary";
-import { formatAssetAmount, formatDate } from "@/lib/formatting";
-import { formatAssetAmount, formatDate } from "@/lib/formatting";
+import {
+  formatAssetAmount,
+  formatDate,
+  formatDateTime,
+} from "@/lib/formatting";
 import {
   CheckCircle2,
   Loader2,

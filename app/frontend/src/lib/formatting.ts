@@ -10,7 +10,7 @@ function getDecimalSeparator(locale: string): string {
   );
 }
 
-function normalizeDecimalString(value: number | string): string {
+function normalizeDecimalString(value: number | string | bigint): string {
   if (typeof value === "bigint") {
     return value.toString();
   }
