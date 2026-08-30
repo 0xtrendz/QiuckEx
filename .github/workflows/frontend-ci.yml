@@ -93,6 +93,14 @@ jobs:
         working-directory: ./app/frontend
         run: npm test || npx vitest run
 
+      # #766: automated axe-core a11y audit of the QR/payment components
+      # (generator, pay page, payment states, QR preview). Run as its own
+      # step, like the i18n parity check above, so it isn't silently skipped
+      # by the wider unit test suite.
+      - name: Run accessibility (a11y) checks
+        working-directory: ./app/frontend
+        run: npx vitest run __tests__/a11y-payment-flow.test.tsx
+
   build:
     name: Build Frontend
     runs-on: ubuntu-latest

@@ -1313,9 +1313,9 @@ export default function Generator() {
             </div>
 
             <div className="space-y-4 p-8 rounded-3xl bg-card border border-border backdrop-blur-xl">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted">
+              <p className="text-[10px] font-black uppercase tracking-widest text-muted">
                 Canonical query (from API)
-              </label>
+              </p>
 
               <div className="bg-card border border-border p-4 rounded-xl font-mono text-muted text-xs break-all min-h-[3rem]">
                 {canonicalPreview ?? (
@@ -1832,7 +1832,10 @@ export default function Generator() {
                   {customers.map((customer) => (
                     <div key={customer.id} className="rounded-2xl border border-border-strong bg-surface px-4 py-4">
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <label className="flex items-start gap-3">
+                        <label
+                          className="flex items-start gap-3"
+                          aria-label={`Select ${customer.name} for this invoice`}
+                        >
                           <input
                             type="checkbox"
                             checked={selectedCustomerIds.includes(customer.id)}
