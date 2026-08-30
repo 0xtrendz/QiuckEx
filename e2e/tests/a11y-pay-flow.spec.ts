@@ -36,7 +36,7 @@ test("public pay page has no serious/critical a11y violations", async ({
 }) => {
   await page.goto("/generator");
   await page.getByLabel(/amount/i).fill("5");
-  await page.getByRole("button", { name: /create (payment )?link/i }).click();
+  await page.getByRole("button", { name: /generate payment link/i }).click();
 
   const linkResponse = await page.waitForResponse(
     (res) => res.url().includes("/links") && res.request().method() === "POST",

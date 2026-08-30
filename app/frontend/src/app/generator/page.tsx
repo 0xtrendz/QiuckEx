@@ -1832,10 +1832,14 @@ export default function Generator() {
                   {customers.map((customer) => (
                     <div key={customer.id} className="rounded-2xl border border-border-strong bg-surface px-4 py-4">
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <label
-                          className="flex items-start gap-3"
-                          aria-label={`Select ${customer.name} for this invoice`}
-                        >
+                        {/* eslint-disable-next-line jsx-a11y/label-has-associated-control --
+                            The checkbox is nested inside this label, which is a valid
+                            association; the rule can't statically see accessible text
+                            through the customer name/email/route paragraphs below, but
+                            the browser computes it correctly at runtime and screen
+                            readers announce all of it. An aria-label here would override
+                            (not add to) that text and silently drop the email/route info. */}
+                        <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
                             checked={selectedCustomerIds.includes(customer.id)}
