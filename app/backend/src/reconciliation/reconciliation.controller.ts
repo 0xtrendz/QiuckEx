@@ -18,7 +18,8 @@ import { ReconciliationWorkerService } from './reconciliation-worker.service';
 import { BackfillService, BackfillConfig, BackfillProgress, BackfillResult } from './backfill.service';
 import { AutoMatchService } from './auto-match.service';
 import { UnmatchedQueueRepository } from './unmatched-queue.repository';
-import { ReconciliationReport } from './types/reconciliation.types';
+import { ReconciliationRunRepository } from './reconciliation-run.repository';
+import { ReconciliationReport, ReconciliationRunStatus } from './types/reconciliation.types';
 import type { IncomingTransaction, MatchResult } from './types/auto-match.types';
 import { NetworkSafetyGuard } from '../feature-flags/network-safety.guard';
 import { RequiresFlag } from '../feature-flags/requires-flag.decorator';
@@ -35,7 +36,51 @@ export class ReconciliationController {
     private readonly backfill: BackfillService,
     private readonly autoMatch: AutoMatchService,
     private readonly unmatchedQueue: UnmatchedQueueRepository,
+    private readonly runHistory: ReconciliationRunRepository,
   ) {}
+
+  // ─── Run history (BE-124) ─────────────────────────────────────────────────
+
+  @Get('history')
+  @ApiOperation({ summary: 'List reconciliation run history with per-run summaries (operators only)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max rows (1–100, default 20)' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Zero-based row offset (default 0)' })
+  @ApiQuery({ name: 'status', required: false, enum: ['success', 'drift', 'failed', 'skipped'], description: 'Filter by run status' })
+  @ApiResponse({ status: 200, description: 'Paginated reconciliation run history' })
+  async listHistory(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('status') status?: string,
+  ) {
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit ?? '20', 10) || 20));
+    const parsedOffset = Math.max(0, parseInt(offset ?? '0', 10) || 0);
+    const parsedStatus = this.parseRunStatus(status);
+    return this.runHistory.listRuns({
+      limit: parsedLimit,
+      offset: parsedOffset,
+      status: parsedStatus,
+    });
+  }
+
+  @Get('history/:runId')
+  @ApiOperation({ summary: 'Get a single reconciliation run with per-run drift detail (operators only)' })
+  @ApiResponse({ status: 200, description: 'Reconciliation run summary and drift detail' })
+  @ApiResponse({ status: 404, description: 'Not found' })
+  async getRun(@Param('runId') runId: string) {
+    const summary = await this.runHistory.findById(runId);
+    if (!summary) {
+      throw new NotFoundException(`Reconciliation run ${runId} not found`);
+    }
+    return summary;
+  }
+
+  private parseRunStatus(status?: string): ReconciliationRunStatus | undefined {
+    if (!status) return undefined;
+    if (status === 'success' || status === 'drift' || status === 'failed' || status === 'skipped') {
+      return status;
+    }
+    return undefined;
+  }
 
   // ─── Existing reconciliation endpoints ──────────────────────────────────────
 
