@@ -82,6 +82,9 @@ See [docs/MVP-ROADMAP.md](docs/MVP-ROADMAP.md) for the full roadmap and prioriti
 
 - Backend and Contract architecture diagrams are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Check [docs/CAPABILITY-MAP.md](docs/CAPABILITY-MAP.md) to see which flows are Live, Partial, Mocked, or Experimental before building on them.
+- Before adding backend code, read [docs/BACKEND-MODULE-MAP.md](docs/BACKEND-MODULE-MAP.md) — it says what each module under `app/backend/src/` owns, which modules may depend on which, and how to decide whether your change extends an existing module or needs a new one.
+- Adding or translating user-facing copy? See [docs/LOCALIZATION-GUIDE.md](docs/LOCALIZATION-GUIDE.md) for how strings work across the frontend and mobile clients.
+- Operating a testnet environment? [docs/TESTNET-INCIDENT-RUNBOOK.md](docs/TESTNET-INCIDENT-RUNBOOK.md) covers detection, mitigation, and rollback per incident scenario.
 - See [docs/](docs/) for API, events, and payment flow documentation.
 
 ## Getting Help
