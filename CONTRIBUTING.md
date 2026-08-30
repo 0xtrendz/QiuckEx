@@ -66,6 +66,14 @@ If you prefer to set up the environment manually on your host machine:
 - Follow the [Conventional Commits](https://www.conventionalcommits.org/) style.
 - Add/Update documentation as needed.
 
+## Accessibility
+
+The frontend is checked in CI with `eslint-plugin-jsx-a11y` (errors on the
+QR/payment flow, warnings elsewhere) and `jest-axe`/`axe-core` audits of the
+payment link generator, pay page, and payment-state components — see
+[app/frontend/CONTRIBUTING.md](app/frontend/CONTRIBUTING.md#accessibility)
+for the checklist to follow when touching UI.
+
 ## 8-Week MVP Roadmap & Feature Prioritization
 
 See [docs/MVP-ROADMAP.md](docs/MVP-ROADMAP.md) for the full roadmap and priorities.
