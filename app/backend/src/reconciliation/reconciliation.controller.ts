@@ -23,6 +23,7 @@ import { ReconciliationReport, ReconciliationRunStatus } from './types/reconcili
 import type { IncomingTransaction, MatchResult } from './types/auto-match.types';
 import { NetworkSafetyGuard } from '../feature-flags/network-safety.guard';
 import { RequiresFlag } from '../feature-flags/requires-flag.decorator';
+import { EmergencyClassification } from '../feature-flags/emergency-entrypoint-registry';
 
 /**
  * Admin endpoints for the reconciliation worker and auto-match engine.
@@ -114,6 +115,10 @@ export class ReconciliationController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(NetworkSafetyGuard)
   @RequiresFlag('mainnet.contract_writes')
+  @EmergencyClassification(
+    'blocked',
+    'Triggers a ledger backfill that writes contract state; gated by mainnet.contract_writes and must stop during an incident.',
+  )
   @ApiOperation({ summary: 'Trigger a backfill job for a ledger range (admin only)' })
   @ApiResponse({ status: 200, description: 'Backfill job completed' })
   @ApiResponse({ status: 409, description: 'A backfill job is already running' })
