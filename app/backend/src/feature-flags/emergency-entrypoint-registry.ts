@@ -72,17 +72,17 @@ export interface EntrypointClassification {
 
 // Lazy imports — we import the controller classes only here so the registry
 // can be imported in tests without pulling the full NestJS module graph.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { TransactionsController } =
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   require("../transactions/transactions.controller") as typeof import("../transactions/transactions.controller");
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { StellarController } =
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   require("../stellar/stellar.controller") as typeof import("../stellar/stellar.controller");
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { RefundsController } =
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   require("../refunds/refunds.controller") as typeof import("../refunds/refunds.controller");
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { ReconciliationController } =
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   require("../reconciliation/reconciliation.controller") as typeof import("../reconciliation/reconciliation.controller");
 
 /**

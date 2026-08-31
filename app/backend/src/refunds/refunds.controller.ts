@@ -102,6 +102,10 @@ export class RefundsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(NetworkSafetyGuard)
   @RequiresFlag("mainnet.refunds")
+  @EmergencyClassification(
+    "blocked",
+    "Initiates a refund on mainnet — a contract write; must be halted while the network safety gate is active.",
+  )
   @ApiOperation({ summary: "Initiate a refund (idempotent)" })
   @ApiResponse({
     status: 200,
@@ -121,6 +125,10 @@ export class RefundsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(NetworkSafetyGuard)
   @RequiresFlag("mainnet.refunds")
+  @EmergencyClassification(
+    "blocked",
+    "Approves and executes a pending refund on mainnet; same write-path risk as initiate.",
+  )
   @ApiOperation({ summary: "Approve a pending refund" })
   @ApiResponse({ status: 200, description: "Refund approved" })
   @ApiResponse({ status: 409, description: "Refund is not in pending state" })
@@ -134,6 +142,10 @@ export class RefundsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(NetworkSafetyGuard)
   @RequiresFlag("mainnet.refunds")
+  @EmergencyClassification(
+    "blocked",
+    "Rejects a pending refund — mutates refund state; blocked during emergency to preserve a stable audit trail until the incident is resolved.",
+  )
   @ApiOperation({ summary: "Reject a pending refund" })
   @ApiResponse({ status: 200, description: "Refund rejected" })
   @ApiResponse({ status: 409, description: "Refund is not in pending state" })
