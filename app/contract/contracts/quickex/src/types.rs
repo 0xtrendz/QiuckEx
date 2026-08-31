@@ -217,6 +217,26 @@ pub struct CachedOraclePrice {
     pub recorded_at: u64,
 }
 
+/// Multi-source oracle aggregation configuration (SC-W8-06 / Issue #867).
+///
+/// Controls how [`crate::oracle::fetch_aggregated_price`] combines the
+/// registered oracle sources' individually-cached prices into a single
+/// trusted price: fresh sources (per the existing staleness guard) are
+/// combined via median, sources deviating beyond `max_deviation_bps` from
+/// that median are excluded, and the result fails closed with
+/// `OracleInsufficientSources` if fewer than `min_sources` remain.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleAggregationConfig {
+    /// Minimum number of fresh, non-outlier sources required for a valid
+    /// aggregated price. Must be at least 1.
+    pub min_sources: u32,
+    /// Maximum allowed deviation from the median, in basis points
+    /// (10_000 = 100%). A source priced further from the median than this
+    /// is excluded from the final price.
+    pub max_deviation_bps: u32,
+}
+
 /// Deployment metadata returned by [`crate::QuickexContract::get_deployment_metadata`].
 ///
 /// Clients and indexers can call this view to validate compatibility without
@@ -285,4 +305,21 @@ pub enum PauseReason {
     FeatureUpgrade = 3,
     RegulatoryCompliance = 4,
     OperatorIntervention = 5,
+}
+
+/// A pending, timelocked admin transfer.
+///
+/// Stored under [`DataKey::PendingAdminProposal`](crate::storage::DataKey::PendingAdminProposal)
+/// (singleton) while a proposal is outstanding. Cleared on accept or cancel.
+#[contracttype]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PendingAdminProposal {
+    /// Address proposed to become the new admin.
+    pub proposed_admin: Address,
+    /// Admin address that created the proposal (informational only — any
+    /// current admin, not just this address, may cancel the proposal via
+    /// `cancel_admin_transfer`).
+    pub proposed_by: Address,
+    /// Ledger timestamp at which `accept_admin_transfer` becomes callable.
+    pub eligible_at: u64,
 }

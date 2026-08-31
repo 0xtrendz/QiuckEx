@@ -50,7 +50,8 @@ use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Map, Vec};
 use soroban_sdk::xdr::ToXdr;
 
 use crate::types::{
-    CachedOraclePrice, DisputeVote, EscrowEntry, FeeConfig, Role, StealthEscrowEntry,
+    CachedOraclePrice, DisputeVote, EscrowEntry, FeeConfig, PendingAdminProposal, Role,
+    StealthEscrowEntry,
 };
 
 /// Record type for TTL policy selection.
@@ -113,6 +114,11 @@ pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 pub const LEDGER_THRESHOLD: u32 = 17280; // ~1 day
 pub const SIX_MONTHS_IN_LEDGERS: u32 = 3110400; // ~185 days
 
+/// Minimum timelock (seconds) that must elapse between an admin-transfer
+/// proposal and its acceptance. The caller may configure a longer delay
+/// per-proposal, but never shorter than this floor (Issue #870).
+pub const MIN_ADMIN_TRANSFER_DELAY: u64 = 86_400; // 1 day
+
 /// Bitmask flags for granular operation pausing.
 #[contracttype]
 #[repr(u64)]
@@ -151,6 +157,9 @@ pub enum DataKey {
     ContractVersion,
     /// Admin address (singleton).
     Admin,
+    /// Pending, timelocked admin-transfer proposal (singleton). Absent when
+    /// no transfer is currently proposed (Issue #870).
+    PendingAdminProposal,
     /// Explicit one-time initialization flag (singleton).
     Initialized,
     /// Paused state (singleton).
@@ -210,6 +219,13 @@ pub enum DataKey {
     /// Configurable TTL policy for escrow entries (singleton).
     /// See [`crate::ttl_policy::TtlConfig`] for the stored type.
     TtlConfig,
+    /// Registered multi-source oracle addresses (singleton, SC-W8-06).
+    /// See [`crate::oracle::fetch_aggregated_price`].
+    OracleSources,
+    /// Per-source cached oracle price, keyed by source address (SC-W8-06).
+    OracleSourcePrice(Address),
+    /// Multi-source oracle aggregation configuration (singleton, SC-W8-06).
+    OracleAggregationConfig,
 }
 
 /// Compact escrow record stored on the hot path.
@@ -570,7 +586,9 @@ pub(crate) fn compact_escrow_storage_footprint_bytes(
 
 /// Get the next escrow counter value.
 ///
-/// **Contract**: Returns 0 if never set. Counter is used for `create_escrow`.
+/// **Contract**: Returns 0 if never set. Checked as a post-upgrade invariant
+/// (see `validate_upgrade_invariants`); no contract entrypoint reads it
+/// directly (the `create_escrow` stub that once did was removed — SC-W8-02).
 #[allow(dead_code)]
 pub fn get_escrow_counter(env: &Env) -> u64 {
     let key = DataKey::EscrowCounter;
@@ -579,7 +597,10 @@ pub fn get_escrow_counter(env: &Env) -> u64 {
 
 /// Increment and return the escrow counter.
 ///
-/// **Contract**: Atomic increment. Initial value treated as 0.
+/// **Contract**: Atomic increment. Initial value treated as 0. No contract
+/// entrypoint calls this anymore (the `create_escrow` stub that once did was
+/// removed — SC-W8-02); kept for storage-migration test coverage.
+#[allow(dead_code)]
 pub fn increment_escrow_counter(env: &Env) -> u64 {
     let key = DataKey::EscrowCounter;
     let mut count: u64 = env.storage().persistent().get(&key).unwrap_or(0);
@@ -637,6 +658,32 @@ pub fn set_admin(env: &Env, admin: &Address) {
 pub fn get_admin(env: &Env) -> Option<Address> {
     let key = DataKey::Admin;
     env.storage().persistent().get(&key)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Timelocked Admin Transfer helpers (Issue #870)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Get the currently pending admin-transfer proposal, if any.
+pub fn get_pending_admin_proposal(env: &Env) -> Option<PendingAdminProposal> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingAdminProposal)
+}
+
+/// Store a new (or overwrite the existing) pending admin-transfer proposal.
+pub fn set_pending_admin_proposal(env: &Env, proposal: &PendingAdminProposal) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingAdminProposal, proposal);
+}
+
+/// Clear any pending admin-transfer proposal (on accept or cancel).
+pub fn clear_pending_admin_proposal(env: &Env) {
+    let key = DataKey::PendingAdminProposal;
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -824,6 +871,63 @@ pub fn set_cached_oracle_price(env: &Env, price: &CachedOraclePrice) {
     let key = DataKey::CachedOraclePrice;
     env.storage().persistent().set(&key, price);
     set_or_extend_ttl(env, &key, RecordType::FeeConfig);
+}
+
+// -----------------------------------------------------------------------------
+// Multi-source oracle aggregation (SC-W8-06 / Issue #867)
+// -----------------------------------------------------------------------------
+
+/// Get the list of registered oracle source addresses. Empty if none registered.
+pub fn get_oracle_sources(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OracleSources)
+        .unwrap_or(Vec::new(env))
+}
+
+/// Set the list of registered oracle source addresses.
+pub fn set_oracle_sources(env: &Env, sources: &Vec<Address>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::OracleSources, sources);
+}
+
+/// Get the cached price record for a specific oracle source.
+pub fn get_oracle_source_price(env: &Env, source: &Address) -> Option<CachedOraclePrice> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OracleSourcePrice(source.clone()))
+}
+
+/// Set the cached price record for a specific oracle source. Called when
+/// that source pushes a fresh price via `record_oracle_source_price`.
+pub fn set_oracle_source_price(env: &Env, source: &Address, price: &CachedOraclePrice) {
+    let key = DataKey::OracleSourcePrice(source.clone());
+    env.storage().persistent().set(&key, price);
+    set_or_extend_ttl(env, &key, RecordType::FeeConfig);
+}
+
+/// Get the multi-source oracle aggregation configuration.
+///
+/// Defaults to `{ min_sources: 1, max_deviation_bps: 10_000 }` (any single
+/// fresh registered source suffices, no deviation filtering) when never
+/// explicitly configured, so registering sources works out of the box
+/// before an admin tunes the policy.
+pub fn get_oracle_aggregation_config(env: &Env) -> crate::types::OracleAggregationConfig {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OracleAggregationConfig)
+        .unwrap_or(crate::types::OracleAggregationConfig {
+            min_sources: 1,
+            max_deviation_bps: 10_000,
+        })
+}
+
+/// Set the multi-source oracle aggregation configuration.
+pub fn set_oracle_aggregation_config(env: &Env, config: &crate::types::OracleAggregationConfig) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::OracleAggregationConfig, config);
 }
 
 pub fn is_hook_allowed(env: &Env, hook_contract: &Address) -> bool {

@@ -6,7 +6,7 @@ use crate::{
     },
     storage::{
         put_escrow, DataKey, PauseFlag, CURRENT_CONTRACT_VERSION, LEGACY_CONTRACT_VERSION,
-        PRIVACY_ENABLED_KEY,
+        MIN_ADMIN_TRANSFER_DELAY, PRIVACY_ENABLED_KEY,
     },
     EscrowEntry, EscrowStatus, QuickexContract, QuickexContractClient,
 };
@@ -355,8 +355,8 @@ fn event_data_map(env: &Env, data: Val) -> Map<Symbol, Val> {
 
 #[test]
 fn test_event_schema_catalog_locks_canonical_topics_and_payloads() {
-    assert_eq!(EVENT_SCHEMA_VERSION, 2);
-    assert_eq!(EVENT_SCHEMAS.len(), 29);
+    assert_eq!(EVENT_SCHEMA_VERSION, 3);
+    assert_eq!(EVENT_SCHEMAS.len(), 36);
 
     let escrow_deposited = EVENT_SCHEMAS
         .iter()
@@ -372,6 +372,7 @@ fn test_event_schema_catalog_locks_canonical_topics_and_payloads() {
             "amount_due",
             "amount_paid",
             "expires_at",
+            "receipt_reference",
             "schema_version",
             "timestamp",
             "token"
@@ -704,14 +705,38 @@ fn test_commitment_cycle() {
     assert!(!is_valid_bad_salt);
 }
 
+/// SC-W8-02: `create_escrow(_from, _to, _amount)` was a stub — every argument
+/// was ignored (`_`-prefixed) and it only incremented an internal counter, so
+/// it "succeeded" silently no matter what was passed in, never moved funds,
+/// and never checked authorization. It has been removed; `deposit` (and its
+/// `_with_commitment` / `_partial` siblings) is the sole escrow-creation
+/// entrypoint. Unlike the removed stub, it actually validates its arguments
+/// — an invalid amount is rejected rather than silently accepted — and moves
+/// real funds under the depositor's authorization.
 #[test]
-fn test_create_escrow() {
+fn test_create_escrow_stub_removed_deposit_validates_args_and_moves_funds() {
     let (env, client) = setup();
-    let from = Address::generate(&env);
-    let to = Address::generate(&env);
-    let amount = 1_000;
-    let escrow_id = client.create_escrow(&from, &to, &amount);
-    assert!(escrow_id > 0);
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let salt = Bytes::from_slice(&env, b"sc_w8_02_salt");
+
+    // What the removed stub would have silently accepted (amount = 0) is
+    // now rejected by real argument validation.
+    let result = client.try_deposit(&token, &0, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    assert_eq!(result, Err(Ok(QuickexError::InvalidAmount)));
+
+    // A well-formed deposit succeeds and actually transfers funds — the
+    // stub never touched a token at all.
+    token::StellarAssetClient::new(&env, &token).mint(&owner, &1_000);
+    let commitment = client.deposit(&token, &1_000, &owner, &salt, &0, &None, &1u64, &u64::MAX);
+
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&owner), 0);
+    assert_eq!(token_client.balance(&client.address), 1_000);
+    assert_eq!(
+        client.get_commitment_state(&commitment),
+        Some(EscrowStatus::Pending)
+    );
 }
 
 #[test]
@@ -837,6 +862,9 @@ fn test_event_snapshot_escrow_deposited_schema() {
     assert!(data_map.get(Symbol::new(&env, "amount_paid")).is_some());
     assert!(data_map.get(Symbol::new(&env, "expires_at")).is_some());
     assert!(data_map.get(Symbol::new(&env, "timestamp")).is_some());
+    assert!(data_map
+        .get(Symbol::new(&env, "receipt_reference"))
+        .is_some());
 }
 
 #[test]
@@ -883,6 +911,9 @@ fn test_event_snapshot_escrow_withdrawn_schema() {
     assert!(data_map.get(Symbol::new(&env, "token")).is_some());
     assert!(data_map.get(Symbol::new(&env, "amount")).is_some());
     assert!(data_map.get(Symbol::new(&env, "timestamp")).is_some());
+    assert!(data_map
+        .get(Symbol::new(&env, "receipt_reference"))
+        .is_some());
 }
 
 #[test]
@@ -934,6 +965,9 @@ fn test_event_snapshot_escrow_refunded_schema() {
     assert!(data_map.get(Symbol::new(&env, "token")).is_some());
     assert!(data_map.get(Symbol::new(&env, "amount")).is_some());
     assert!(data_map.get(Symbol::new(&env, "timestamp")).is_some());
+    assert!(data_map
+        .get(Symbol::new(&env, "receipt_reference"))
+        .is_some());
 }
 
 #[test]
@@ -1397,8 +1431,11 @@ fn test_set_admin() {
     // Initialize admin
     client.initialize(&admin);
 
-    // Transfer admin rights
-    client.set_admin(&admin, &new_admin);
+    // Propose, wait out the timelock, then accept — there is no instant path.
+    client.propose_admin_transfer(&admin, &new_admin, &MIN_ADMIN_TRANSFER_DELAY);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + MIN_ADMIN_TRANSFER_DELAY);
+    client.accept_admin_transfer(&new_admin);
 
     // Verify new admin is set
     assert_eq!(client.get_admin(), Some(new_admin.clone()));
@@ -1415,8 +1452,13 @@ fn test_event_snapshot_admin_changed_schema() {
     let new_admin = Address::generate(&env);
 
     client.initialize(&old_admin);
-    client.set_admin(&old_admin, &new_admin);
+    client.propose_admin_transfer(&old_admin, &new_admin, &MIN_ADMIN_TRANSFER_DELAY);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + MIN_ADMIN_TRANSFER_DELAY);
+    client.accept_admin_transfer(&new_admin);
 
+    // accept_admin_transfer emits AdminTransferAccepted followed by the
+    // general-purpose AdminChanged event; the latter is what this test locks.
     let (topics, data) = latest_contract_event(&env, &client.address);
 
     let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
@@ -1449,8 +1491,9 @@ fn test_set_admin_by_non_admin_fails() {
     // Initialize admin
     client.initialize(&admin);
 
-    // Non-admin tries to transfer admin rights - should fail
-    let result = client.try_set_admin(&non_admin, &new_admin);
+    // Non-admin tries to propose an admin transfer - should fail
+    let result =
+        client.try_propose_admin_transfer(&non_admin, &new_admin, &MIN_ADMIN_TRANSFER_DELAY);
     assert_contract_error(result, QuickexError::InsufficientRole);
 }
 
@@ -1463,8 +1506,11 @@ fn test_old_admin_cannot_pause_after_transfer() {
     // Initialize admin
     client.initialize(&admin);
 
-    // Transfer admin rights
-    client.set_admin(&admin, &new_admin);
+    // Transfer admin rights via the timelocked flow
+    client.propose_admin_transfer(&admin, &new_admin, &MIN_ADMIN_TRANSFER_DELAY);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + MIN_ADMIN_TRANSFER_DELAY);
+    client.accept_admin_transfer(&new_admin);
 
     // Old admin tries to pause - should fail
     let result = client.try_set_paused(&admin, &true, &1u32);
