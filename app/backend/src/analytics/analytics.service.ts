@@ -216,8 +216,10 @@ export class AnalyticsService {
       );
     }
 
+    const payload = event.payload ?? {};
+
     for (const [field, spec] of Object.entries(schema.fields)) {
-      const value = event.payload[field];
+      const value = payload[field];
       if (value === undefined || value === null) {
         if (spec.required) {
           errors.push(`Missing required field "${field}" for event ${event.name}`);
@@ -232,7 +234,7 @@ export class AnalyticsService {
       }
     }
 
-    for (const field of Object.keys(event.payload)) {
+    for (const field of Object.keys(payload)) {
       if (!schema.fields[field]) {
         errors.push(`Unexpected field "${field}" for event ${event.name}`);
       }
